@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: model-pos2corr
+  namespace: mesoor
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: model-pos2corr
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: model-pos2corr
+    spec:
+      containers:
+        - name: model-pos2corr
+          image: harbor.nadileaf.com/boe/model-pos2corr:v0.3
+          imagePullPolicy: Always
+          resources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          env:
+            - name: DATA_ENGINE_URL
+              value: "data-engine:9001"
+          command:
+            - bash
+            - -c
+            - |
+              uvicorn main:app --host 0.0.0.0 --port 80
+      imagePullSecrets:
+        - name: harbor-pull-secret
+
+---
+kind: Service
+apiVersion: v1
+metadata:
+  name: model-pos2corr
+  namespace: mesoor
+spec:
+  selector:
+    app.kubernetes.io/name: model-pos2corr
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: 80
