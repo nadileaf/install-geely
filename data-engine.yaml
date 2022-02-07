@@ -1,0 +1,475 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: data-engine-oss
+  namespace: mesoor
+data:
+  OSS_ACCESS_KEY_ID: AKIA2QRVYAA7KGZ2JGWG
+  OSS_SECRET_ACCESS_KEY: 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
+  OSS_ENDPOINT: http://s3.cn-northwest-1.amazonaws.com.cn
+  OSS_KEY_NEO4J_DUMP: s3://mesoor-customer-deployment/mesoor-dataset/neo4j-dump/external/graph_2021_01_14_add_156.dump
+  OSS_KEY_ELASTICSEARCH_PREFIX: s3://mesoor-customer-deployment/mesoor-dataset/data-engine/elasticsearch/20211018
+  ES_HOST: data-engine-es-http
+  ES_PORT: "9200"
+  ES_ENDPOINT: http://data-engine-es-http:9200
+  COMPANY_INDEX: linking_com_20211220
+  POSITION_INDEX: linking_pos_20211018
+  INDUSTRY_INDEX: linking_ind_20211018
+  MAJOR_INDEX: linking_maj_20211018
+  ES_LOGO_INDEX: com_sch_logo_20211018
+  ES_HOLDER_INDEX: com_holder_20211018
+  OSS_KEY_MESOORFLOW_COMPANY_NER_WEIGHT: s3://mesoor-customer-deployment/mesoor-models/mesoorflow/57/fee6e9926cdd450d87cdedd4b78640ac/artifacts/model/best__f1_exact_match.weights
+  OSS_KEY_MESOORFLOW_COMPANY_NER_PARAM: s3://mesoor-customer-deployment/mesoor-models/mesoorflow/57/fee6e9926cdd450d87cdedd4b78640ac/artifacts/param.json
+  OSS_KEY_MESOORFLOW_COMPANY_NER_TOKEN: s3://mesoor-customer-deployment/mesoor-models/mesoorflow/57/fee6e9926cdd450d87cdedd4b78640ac/artifacts/token2id.json
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bifurcan-linking
+  namespace: mesoor
+spec:
+  ports:
+  - name: grpc
+    port: 9090
+    protocol: TCP
+    targetPort: 9090
+  selector:
+    app.kubernetes.io/name: bifurcan-linking
+    app.kubernetes.io/part-of: data-engine
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: data-engine
+  namespace: mesoor
+spec:
+  ports:
+  - name: grpc-data-engine
+    port: 9001
+    protocol: TCP
+    targetPort: 9001
+  - name: grpc-knowledge-graph
+    port: 9000
+    protocol: TCP
+    targetPort: 9000
+  - name: grpc-data-engine-sdk
+    port: 10001
+    protocol: TCP
+    targetPort: 10001
+  selector:
+    app.kubernetes.io/name: data-engine
+    app.kubernetes.io/part-of: data-engine
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: data-engine-grpc
+  namespace: mesoor
+spec:
+  ports:
+  - name: grpc-envoy
+    port: 80
+    protocol: TCP
+    targetPort: 19090
+  - name: grpc
+    port: 19090
+    protocol: TCP
+    targetPort: 19090
+  selector:
+    app.kubernetes.io/name: data-engine
+    app.kubernetes.io/part-of: data-engine
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mesoorflow-company-ner
+  namespace: mesoor
+spec:
+  ports:
+  - name: grpc
+    port: 9090
+    protocol: TCP
+    targetPort: 9090
+  selector:
+    app.kubernetes.io/name: mesoorflow-company-ner
+    app.kubernetes.io/part-of: data-engine
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bifurcan-linking
+  namespace: mesoor
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: bifurcan-linking
+      app.kubernetes.io/part-of: data-engine
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: bifurcan-linking
+        app.kubernetes.io/part-of: data-engine
+    spec:
+      containers:
+      - command:
+        - bash
+        - -c
+        - |
+          export PYTHONPATH='./';
+          python projects/linking/server.pyc
+        env:
+        - name: PORT
+          value: "9090"
+        - name: COMPANY_NER_HOST
+          value: mesoorflow-company-ner
+        - name: COMPANY_NER_PORT
+          value: "9090"
+        - name: TAGGER_DOMAIN
+          value: linking
+        - name: LOG_LEVEL
+          value: INFO
+        envFrom:
+        - configMapRef:
+            name: data-engine-oss
+        image: harbor.nadileaf.com/data-engine/bifurcan:v0.0.37-cpu-linking
+        imagePullPolicy: IfNotPresent
+        name: bifurcan-linking
+        resources:
+          limits:
+            cpu: "1"
+            memory: 1500Mi
+          requests:
+            cpu: 800m
+            memory: 1000Mi
+      initContainers:
+      - command:
+        - bash
+        - -cx
+        - |
+          sleep 10;
+          indexes=(${COMPANY_INDEX} ${POSITION_INDEX} ${INDUSTRY_INDEX} ${MAJOR_INDEX} ${ES_LOGO_INDEX} ${ES_HOLDER_INDEX})
+          for i in "${indexes[@]}";
+          do
+            curl ${ES_ENDPOINT}/_cat/indices/${i} --fail
+            if [ $? != 0 ]
+            then
+              elasticdump --input=${OSS_KEY_ELASTICSEARCH_PREFIX}/${i}.mapping \
+                          --output=${ES_ENDPOINT}/${i} --type mapping \
+                          --s3AccessKeyId ${OSS_ACCESS_KEY_ID} --s3SecretAccessKey ${OSS_SECRET_ACCESS_KEY} \
+                          --s3Endpoint ${OSS_ENDPOINT} --s3ForcePathStyle true
+              elasticdump --input=${OSS_KEY_ELASTICSEARCH_PREFIX}/${i}.jsonl \
+                          --output=${ES_ENDPOINT}/${i} --limit 1000 \
+                          --s3AccessKeyId ${OSS_ACCESS_KEY_ID} --s3SecretAccessKey ${OSS_SECRET_ACCESS_KEY} \
+                          --s3Endpoint ${OSS_ENDPOINT} --concurrency ${CONCURRENCY} --s3ForcePathStyle true
+            fi
+          done
+        env:
+        - name: CONCURRENCY
+          value: "4"
+        envFrom:
+        - configMapRef:
+            name: data-engine-oss
+        image: harbor.nadileaf.com/boe/elastic-dump:v6.76.0-curl
+        imagePullPolicy: IfNotPresent
+        name: load-index-from-oss-to-es
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: data-engine
+  namespace: mesoor
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: data-engine
+      app.kubernetes.io/part-of: data-engine
+  template:
+    metadata:
+      annotations:
+        sidecar.istio.io/userVolumeMount: '[{"name":"dataengine-envoy-grpc-descriptor","mountPath":"/etc/envoy"}]'
+      labels:
+        app.kubernetes.io/name: data-engine
+        app.kubernetes.io/part-of: data-engine
+    spec:
+      containers:
+      - command:
+        - bash
+        - -c
+        - |
+          python knowledge-graph.pyc grpc_serve -port 9000 -workers 4
+        env:
+        - name: LOG_LEVEL
+          value: DEBUG
+        - name: NEO4J_USER
+          value: neo4j
+        - name: NEO4J_URL
+          value: kg-neo4j-external:7687
+        - name: NEO4J_PASSWORD
+          value: nadinadi
+        - name: COMPANY_NAME_CUT_URL
+          value: mesoorflow-company-ner:9090
+        image: harbor.nadileaf.com/data-engine/data-engine:v0.0.44a0
+        imagePullPolicy: IfNotPresent
+        name: knowledge-graph
+        resources:
+          requests:
+            cpu: 500m
+            memory: 500Mi
+          limits:
+            cpu: 500m
+            memory: 1000Mi
+      - command:
+        - bash
+        - -c
+        - |
+          if [[ $USE_REDIS_CACHE == "True" ]] ; then ./wait-for-it.sh ${CACHE_REDIS_URL} -t 300; fi ;
+          python data-engine.pyc grpc_serve -port 9001 -workers 1 &
+          python data-engine.pyc sdk_grpc_serve -port 10001 -workers 1 &
+          python /usr/local/lib/python3.7/site-packages/DataEngine/server/grpc_server_v1alpha1.pyc
+        env:
+        - name: LOG_LEVEL
+          value: INFO
+        - name: TIMING
+          value: "true"
+        - name: BIFURCAN_LINKING_URL
+          value: bifurcan-linking:9090
+        - name: KNOWLEDGE_GRAPH_URL
+          value: data-engine:9000
+        - name: USE_REDIS_CACHE
+          value: "True"
+        - name: CACHE_REDIS_URL
+          value: company-redis:6379
+        - name: CACHE_REDIS_DB
+          value: "7"
+        - name: WORKER
+          value: "8"
+        image: harbor.nadileaf.com/data-engine/data-engine:v0.0.44a0
+        imagePullPolicy: IfNotPresent
+        name: data-engine
+        resources:
+          requests:
+            cpu: 300m
+            memory: 500Mi
+      initContainers:
+      - command:
+        - bash
+        - -c
+        - |
+          cp /app/dataengine_descriptor_set.pb /data/dataengine_descriptor_set.pb
+        image: harbor.nadileaf.com/data-engine/data-engine:v0.0.44a0
+        imagePullPolicy: IfNotPresent
+        name: init-envoy-grpc-descriptor
+        volumeMounts:
+        - mountPath: /data
+          name: dataengine-envoy-grpc-descriptor
+      volumes:
+      - emptyDir: {}
+        name: dataengine-envoy-grpc-descriptor
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mesoorflow-company-ner
+  namespace: mesoor
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mesoorflow-company-ner
+      app.kubernetes.io/part-of: data-engine
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mesoorflow-company-ner
+        app.kubernetes.io/part-of: data-engine
+    spec:
+      containers:
+      - command:
+        - bash
+        - -c
+        - |
+          sleep 10;
+          export PYTHONPATH='./' ;
+          export AWS_ACCESS_KEY_ID=${OSS_ACCESS_KEY_ID};
+          export AWS_SECRET_ACCESS_KEY=${OSS_SECRET_ACCESS_KEY};
+          aws s3 cp ${OSS_KEY_MESOORFLOW_COMPANY_NER_WEIGHT} ./models/best__f1_exact_match.weights --endpoint ${OSS_ENDPOINT};
+          aws s3 cp ${OSS_KEY_MESOORFLOW_COMPANY_NER_PARAM} ./models/ --endpoint ${OSS_ENDPOINT};
+          aws s3 cp ${OSS_KEY_MESOORFLOW_COMPANY_NER_TOKEN} ./models/ --endpoint ${OSS_ENDPOINT};
+          python mesoorflow/service/grpc_servicer/bifurcan_servicer.pyc
+        env:
+        - name: LOAD_ARGS
+          value: param_path:./models/param.json;weight_path:./models/best__f1_exact_match.weights;token2id_path:./models/token2id.json
+        - name: FETCH_S3
+          value: "True"
+        - name: PORT
+          value: "9090"
+        envFrom:
+        - configMapRef:
+            name: data-engine-oss
+        image: harbor.nadileaf.com/ml-model/mesoorflow:v0.0.4-endpoint-cpu
+        imagePullPolicy: IfNotPresent
+        name: mesoorflow-company-ner
+        resources:
+          limits:
+            cpu: 500m
+            memory: 500Mi
+          requests:
+            cpu: 500m
+            memory: 500Mi
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: company-redis
+  namespace: mesoor
+spec:
+  serviceName: company-redis
+  replicas: 1
+  selector:
+    matchLabels:
+      app: company-redis
+  template:
+    metadata:
+      labels:
+        app: company-redis
+    spec:
+      containers:
+        - name: company-redis
+          image: harbor.nadileaf.com/boe/redis:5-alpine 
+          imagePullPolicy: IfNotPresent
+          resources:
+            limits:
+              cpu: 1
+              memory: 1000Mi
+            requests:
+              cpu: 1
+              memory: 1000Mi
+
+          volumeMounts:
+            - name: company-redis
+              mountPath: /data
+
+          args: ["--save", '1800', '1']
+
+  volumeClaimTemplates:
+    - metadata:
+        name: company-redis
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: "10Gi"
+
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: company-redis
+  namespace: mesoor
+  labels:
+    app: company-redis
+spec:
+  selector:
+    app: company-redis
+  ports:
+    - port: 6379
+      targetPort: 6379
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kg-neo4j-external
+  namespace: mesoor
+spec:
+  serviceName: kg-neo4j-external
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kg-neo4j-external
+  template:
+    metadata:
+      labels:
+        app: kg-neo4j-external
+    spec:
+      containers:
+        - name: kg-neo4j-external
+          image: harbor.nadileaf.com/boe/neo4j:3.5_aws2_autodump_v5
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: data-engine-oss
+          env:
+            - name: NEO4J_USER
+              value: neo4j
+            - name: NEO4J_PASSWORD
+              value: nadinadi
+            - name: NEO4J_USERNAME
+              value: neo4j
+            # https://neo4j.com/docs/operations-manual/current/performance/memory-configuration/
+            - name: NEO4J_dbms_memory_heap_initial__size
+              value: 20G
+            - name: NEO4J_dbms_memory_heap_max__size
+              value: 20G
+            - name: NEO4J_dbms_memory_pagecache_size
+              value: 16G
+            - name: AWS_ACCESS_KEY_ID
+              value: "$(OSS_ACCESS_KEY_ID)"
+            - name: AWS_SECRET_ACCESS_KEY
+              value: "$(OSS_SECRET_ACCESS_KEY)"
+          resources:
+            requests:
+              cpu: "1"
+              memory: 32G
+            limits:
+              cpu: "2"
+              memory: 32G
+          command:
+            - "/bin/bash"
+            - "-c"
+            - |
+              sleep 10;
+              echo ${AWS_ACCESS_KEY_ID};
+              echo ${AWS_SECRET_ACCESS_KEY};
+              echo ${OSS_ENDPOINT};
+              echo ${OSS_KEY_NEO4J_DUMP};
+              aws2 s3 cp ${OSS_KEY_NEO4J_DUMP} /tmp/graph.dump --endpoint ${OSS_ENDPOINT};
+              ./bin/neo4j-admin load --from='/tmp/graph.dump' --database=graph.db --force;
+              rm -rf /var/lib/neo4j/data/dbms/auth /tmp/graph.dump;
+              ./bin/neo4j-admin set-initial-password $NEO4J_PASSWORD;
+              chown -R neo4j.neo4j /var/lib/neo4j/data/databases/graph.db/ ;
+              exec /docker-entrypoint.sh "neo4j"
+          volumeMounts:
+            - name: kg-neo4j-external-db
+              mountPath: /var/lib/neo4j/data
+
+  volumeClaimTemplates:
+    - metadata:
+        name: kg-neo4j-external-db
+      spec:
+        accessModes: [ "ReadWriteOnce" ]
+        resources:
+          requests:
+            storage: "20Gi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kg-neo4j-external
+  namespace: mesoor
+  labels:
+    app: kg-neo4j-external
+spec:
+  selector:
+    app: kg-neo4j-external
+  ports:
+    - name: http
+      port: 7474
+      targetPort: 7474
+      protocol: TCP
+
+    - name: bolt
+      port: 7687
+      targetPort: 7687
