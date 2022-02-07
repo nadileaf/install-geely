@@ -1,0 +1,111 @@
+apiVersion: elasticsearch.k8s.elastic.co/v1
+kind: Elasticsearch
+metadata:
+  name: data-engine
+  namespace: mesoor
+spec:
+  version: 7.14.1
+  image: harbor.nadileaf.com/boe/elasticsearch:7.14.1
+  http:
+    tls:
+      selfSignedCertificate:
+        disabled: true
+  nodeSets:
+    - name: master-nodes
+      count: 1
+      podTemplate:
+        metadata:
+          annotations:
+            traffic.sidecar.istio.io/excludeInboundPorts: "9300"
+            traffic.sidecar.istio.io/excludeOutboundPorts: "9300"
+        spec:
+          automountServiceAccountToken: true
+          containers:
+            - name: elasticsearch
+              resources:
+                requests:
+                  cpu: "1"
+                  memory: 4Gi
+                limits:
+                  cpu: "2"
+                  memory: 4Gi
+              readinessProbe:
+                exec:
+                  command:
+                    - bash
+                    - -c
+                    - /mnt/elastic-internal/scripts/readiness-probe-script.sh
+                failureThreshold: 3
+                initialDelaySeconds: 10
+                periodSeconds: 12
+                successThreshold: 1
+                timeoutSeconds: 12
+              env:
+                - name: READINESS_PROBE_TIMEOUT
+                  value: "10"
+      config:
+        node.roles: [ "master" ]
+        xpack.security.authc:
+          anonymous:
+            username: anonymous
+            roles: superuser
+            authz_exception: false
+      volumeClaimTemplates:
+        - metadata:
+            name: elasticsearch-data
+          spec:
+            accessModes:
+              - ReadWriteOnce
+            resources:
+              requests:
+                storage: 10Gi
+            
+    - name: data-nodes
+      count: 3
+      podTemplate:
+        metadata:
+          annotations:
+            traffic.sidecar.istio.io/excludeInboundPorts: "9300,9443"
+            traffic.sidecar.istio.io/excludeOutboundPorts: "9300,443"
+            traffic.sidecar.istio.io/includeInboundPorts: "*"
+        spec:
+          automountServiceAccountToken: true
+          containers:
+            - name: elasticsearch
+              resources:
+                requests:
+                  cpu: "1"
+                  memory: 8Gi
+                limits:
+                  cpu: "2"
+                  memory: 8Gi
+              readinessProbe:
+                exec:
+                  command:
+                    - bash
+                    - -c
+                    - /mnt/elastic-internal/scripts/readiness-probe-script.sh
+                failureThreshold: 3
+                initialDelaySeconds: 10
+                periodSeconds: 12
+                successThreshold: 1
+                timeoutSeconds: 12
+              env:
+                - name: READINESS_PROBE_TIMEOUT
+                  value: "10"
+      config:
+        node.roles: [ "data" ]
+        xpack.security.authc:
+          anonymous:
+            username: anonymous
+            roles: superuser
+            authz_exception: false
+      volumeClaimTemplates:
+        - metadata:
+            name: elasticsearch-data
+          spec:
+            accessModes:
+              - ReadWriteOnce
+            resources:
+              requests:
+                storage: 50Gi
