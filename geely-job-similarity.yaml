@@ -1,0 +1,71 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+ name: geely-job-similarity
+ namespace: mesoor
+spec:
+ replicas: 1
+ selector:
+   matchLabels:
+     app.kubernetes.io/name: geely-job-similarity
+     app.kubernetes.io/part-of: geely
+ template:
+   metadata:
+     labels:
+       app.kubernetes.io/name: geely-job-similarity
+       app.kubernetes.io/part-of: geely
+   spec:
+     containers:
+       - name: geely-job-similarity
+         image: harbor.nadileaf.com/boe/job-similarity:v0.0.4
+         imagePullPolicy: IfNotPresent
+
+         resources:
+           requests:
+             cpu: 500m
+             memory: 500Mi
+           limits:
+             cpu: 500m
+             memory: 500Mi
+
+         command:
+           - bash
+           - -c
+           - |
+             python http_server.py &
+             python grpc_server.py
+
+     imagePullSecrets:
+       - name: cn-hangzhou-regsecret
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+ name: geely-job-similarity
+ namespace: mesoor
+spec:
+ selector:
+   app.kubernetes.io/name: geely-job-similarity
+   app.kubernetes.io/part-of: geely
+ ports:
+   - name: http
+     protocol: TCP
+     port: 80
+     targetPort: 10000
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+ name: geely-job-similarity-grpc
+ namespace: mesoor
+spec:
+ selector:
+   app.kubernetes.io/name: geely-job-similarity
+   app.kubernetes.io/part-of: geely
+ ports:
+   - name: grpc
+     protocol: TCP
+     port: 10001
+     targetPort: 10001
