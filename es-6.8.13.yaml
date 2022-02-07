@@ -1,0 +1,157 @@
+kind: Service
+apiVersion: v1
+metadata:
+  name: entity-elasticsearch-master
+  namespace: es
+spec:
+  selector:
+    app.kubernetes.io/name: "entity-elasticsearch-master"
+  ports:
+    - name: http
+      protocol: TCP
+      port: 9200
+    - name: transport
+      protocol: TCP
+      port: 9300
+---
+kind: Service
+apiVersion: v1
+metadata:
+  name: entity-elasticsearch-master-headless
+  namespace: es
+  labels:
+    app.kubernetes.io/name: "entity-elasticsearch-headless"
+  annotations:
+    # Create endpoints also if the related pod isn't ready
+    service.alpha.kubernetes.io/tolerate-unready-endpoints: "true"
+spec:
+  clusterIP: None # This is needed for statefulset hostnames like elasticsearch-0 to resolve
+  selector:
+    app.kubernetes.io/name: "entity-elasticsearch-master"
+  ports:
+    - name: http
+      port: 9200
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: entity-elasticsearch-master
+  namespace: es
+  labels:
+    app.kubernetes.io/name: "entity-elasticsearch-master"
+spec:
+  serviceName: entity-elasticsearch-master-headless
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: "entity-elasticsearch-master"
+  replicas: 3
+  podManagementPolicy: Parallel
+  updateStrategy:
+    type: RollingUpdate
+  volumeClaimTemplates:
+    - metadata:
+        name: datadir
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 90Gi
+  template:
+    metadata:
+      name: "entity-elasticsearch-master"
+      labels:
+        app.kubernetes.io/name: "entity-elasticsearch-master"
+      annotations:
+        sidecar.istio.io/inject: "false"
+    spec:
+      tolerations:
+        - key: "dedicated"
+          operator: "Equal"
+          value: "infrastructure"
+          effect: "NoSchedule"
+      securityContext:
+        fsGroup: 1000
+      terminationGracePeriodSeconds: 120
+#      nodeName: shdxrcptk8snode03
+      containers:
+        - name: "elasticsearch"
+          image: registry.cn-hangzhou.aliyuncs.com/mesoor-ai/elasticsearch-ik-pinyin:6.8.13
+          imagePullPolicy: IfNotPresent
+          readinessProbe:
+            failureThreshold: 3
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            successThreshold: 3
+            timeoutSeconds: 5
+            exec:
+              command:
+                - sh
+                - -c
+                - |
+                  #!/usr/bin/env bash -e
+                  # If the node is starting up wait for the cluster to be green
+                  # Once it has started only check that the node itself is responding
+                  START_FILE=/tmp/.es_start_file
+                  http () {
+                      local path="${1}"
+                      if [ -n "${ELASTIC_USERNAME}" ] && [ -n "${ELASTIC_PASSWORD}" ]; then
+                        BASIC_AUTH="-u ${ELASTIC_USERNAME}:${ELASTIC_PASSWORD}"
+                      else
+                        BASIC_AUTH=''
+                      fi
+                      curl -XGET -s -k --fail ${BASIC_AUTH} http://127.0.0.1:9200${path}
+                  }
+                  if [ -f "${START_FILE}" ]; then
+                      echo 'Elasticsearch is already running, lets check the node is healthy'
+                      http "/"
+                  else
+                      echo 'Waiting for elasticsearch cluster to become green'
+                      if http "/_cluster/health?wait_for_status=green&timeout=1s" ; then
+                          touch ${START_FILE}
+                          exit 0
+                      else
+                          echo 'Cluster is not yet green'
+                          exit 1
+                      fi
+                  fi
+          ports:
+            - name: http
+              containerPort: 9200
+            - name: transport
+              containerPort: 9300
+          resources:
+            limits:
+              cpu: '4'
+              memory: 8Gi
+            requests:
+              cpu: '2'
+              memory: 4Gi
+          env:
+            - name: node.name
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: discovery.zen.ping.unicast.hosts
+              value: "entity-elasticsearch-master-headless"
+            - name: cluster.name
+              value: "entity-elasticsearch"
+            - name: discovery.zen.minimum_master_nodes
+              value: "2"
+            - name: network.host
+              value: "0.0.0.0"
+            - name: ES_JAVA_OPTS
+              value: "-Xmx3g -Xms3g -XX:MaxGCPauseMillis=300 -XX:InitiatingHeapOccupancyPercent=75"
+            - name: node.master
+              value: "true"
+            - name: node.data
+              value: "true"
+            - name: node.ingest
+              value: "true"
+            - name: path.data
+              value: "/usr/share/elasticsearch/data"
+          volumeMounts:
+            - name: datadir
+              mountPath: /usr/share/elasticsearch/data
+      imagePullSecrets:
+#      - name: 
